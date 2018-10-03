@@ -1,8 +1,11 @@
 containers-dedup
 ===========
-PoC experimental tool for containers storage data deduplication.  It uses
-the FIDEDUPERANGE ioctl for telling the file system to deduplicate
-blocks with the same data.
+PoC experimental tool for containers storage data deduplication.
+It is just an experiment that I've used to understand how much can be
+saved in containers storage.
+
+It uses the FIDEDUPERANGE ioctl for telling the file system to
+deduplicate blocks with the same data.
 
 Usage:
 =======================================================
