@@ -1,4 +1,4 @@
-/* rolling-dedup
+/* containers-dedup
 
    Copyright (C) 2018 Giuseppe Scrivano <giuseppe@scrivano.org>
 
@@ -32,7 +32,6 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <bitrotate.h>
-#include <bupsplit.h>
 #include <hash.h>
 
 struct chunk
@@ -172,7 +171,7 @@ dedup_list (struct chunk *l, off_t *dedup_bytes)
 }
 
 static int
-analyze (Hash_table *data, bool use_rolling_checksum, const char *acc_path, const char *path, struct stat *st, int *total_chunks)
+analyze (Hash_table *data, const char *acc_path, const char *path, struct stat *st, int *total_chunks)
 {
   int fd = open (acc_path, O_RDONLY);
   void *addr;
@@ -209,30 +208,7 @@ analyze (Hash_table *data, bool use_rolling_checksum, const char *acc_path, cons
       int next_offset;
       int aligned_off, aligned_len;
 
-      if (! use_rolling_checksum)
-        next_offset = block_size;
-      else
-        {
-          next_offset = bupsplit_find_ofs (addr + off, len - off, NULL);
-          if (next_offset == 0)
-            break;
-        }
-
-      if (off & (block_size - 1) == 0)
-        aligned_off = off;
-      else
-        aligned_off = off + block_size - (off & (block_size - 1));
-      aligned_len = next_offset - (next_offset & (block_size - 1));
-
-      if (aligned_len == 0)
-        {
-          off += next_offset;
-          continue;
-        }
-      if (aligned_off + aligned_len >= len)
-        break;
-
-      c = make_chunk (addr, path, st->st_ino, aligned_off, aligned_len);
+      c = make_chunk (addr, path, st->st_ino, off, block_size);
       if (c == NULL)
         break;
 
@@ -247,7 +223,7 @@ analyze (Hash_table *data, bool use_rolling_checksum, const char *acc_path, cons
         }
 
       chunks++;
-      off += next_offset;
+      off += block_size;
       ret = 0;
     }
 
@@ -266,7 +242,6 @@ show_usage (bool err)
   FILE *o = err ? stderr : stdout;
   fprintf (o, "dedup [-hn] PATH...\n");
   fprintf (o, "  -h   show usage and exit\n");
-  fprintf (o, "  -r   use rolling checksum (not recommended)\n");
   exit (err ? EXIT_FAILURE : EXIT_SUCCESS);
 }
 
@@ -281,7 +256,6 @@ main (int argc, char **argv)
   int flags, opt;
   int chunks_so_far = 0;
   int total_chunks = 0;
-  bool use_rolling_checksum = false;
 
   data = hash_initialize (10, NULL, chunk_hasher, chunk_compare, chunk_free);
 
@@ -292,10 +266,6 @@ main (int argc, char **argv)
     {
       switch (opt)
         {
-        case 'r':
-          use_rolling_checksum = true;
-          break;
-
         case 'h':
           return show_usage (false);
 
@@ -323,7 +293,7 @@ main (int argc, char **argv)
             {
               total_bytes += e->fts_statp->st_size;
 
-              if (analyze (data, use_rolling_checksum, e->fts_accpath, e->fts_path, e->fts_statp, &total_chunks) < 0)
+              if (analyze (data, e->fts_accpath, e->fts_path, e->fts_statp, &total_chunks) < 0)
                 error (0, errno, "error processing file %s", e->fts_path);
             }
         }
