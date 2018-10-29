@@ -51,20 +51,34 @@ compute_checksum (const char *data, size_t len)
   uint64_t ret = 0;
 
   for (i = 0; i < len; i++)
-    ret = ~rotl64 (ret, 7) + data[i];
+    ret = rotl64 (ret, 7) + data[i];
 
   return ret;
 }
 
 static struct chunk *
-make_chunk (const char *data, const char *path, ino_t ino, size_t offset, size_t len)
+make_chunk (Hash_table *paths, const char *data, const char *path, ino_t ino, size_t offset, size_t len)
 {
   struct chunk *c = malloc (sizeof (*c));
+  char *p, *old;
   if (c == NULL)
     abort ();
-  c->path = strdup (path);
-  if (c->path == NULL)
-    abort ();
+
+  p = hash_lookup (paths, path);
+  if (p == NULL)
+    {
+      int ret;
+
+      p = strdup (path);
+      if (p == NULL)
+        abort ();
+
+      ret = hash_insert_if_absent (paths, p, NULL);
+      if (ret < 0)
+        abort ();
+    }
+
+  c->path = p;
   c->offset = offset;
   c->len = len;
   c->next = NULL;
@@ -94,7 +108,6 @@ chunk_free (void *p)
 {
   struct chunk *c = (struct chunk *) p;
   struct chunk *next;
-  free (c->path);
   next = c->next;
   free (c);
   if (next)
@@ -114,8 +127,12 @@ dedup (int src_fd, int dest_fd, off_t src_off, off_t dest_off, off_t len, off_t 
   fdr->info[0].dest_fd = dest_fd;
   fdr->info[0].dest_offset = dest_off;
 
-  if (ioctl (src_fd, FIDEDUPERANGE, fdr) < 0)
+  if (ioctl (src_fd, FIDEDUPERANGE, fdr) < 0){
+    if (errno == EINVAL)
+      return 0;
+
     return -1;
+  }
 
   if (fdr->info[0].status < 0)
     {
@@ -171,7 +188,7 @@ dedup_list (struct chunk *l, off_t *dedup_bytes)
 }
 
 static int
-analyze (Hash_table *data, const char *acc_path, const char *path, struct stat *st, int *total_chunks)
+analyze (Hash_table *data, Hash_table *paths, const char *acc_path, const char *path, struct stat *st, int *total_chunks)
 {
   int fd = open (acc_path, O_RDONLY);
   void *addr;
@@ -205,10 +222,8 @@ analyze (Hash_table *data, const char *acc_path, const char *path, struct stat *
     {
       struct chunk *c;
       struct chunk *old = NULL;
-      int next_offset;
-      int aligned_off, aligned_len;
 
-      c = make_chunk (addr, path, st->st_ino, off, block_size);
+      c = make_chunk (paths, addr, path, st->st_ino, off, block_size);
       if (c == NULL)
         break;
 
@@ -224,7 +239,6 @@ analyze (Hash_table *data, const char *acc_path, const char *path, struct stat *
 
       chunks++;
       off += block_size;
-      ret = 0;
     }
 
   *total_chunks += chunks;
@@ -245,6 +259,19 @@ show_usage (bool err)
   exit (err ? EXIT_FAILURE : EXIT_SUCCESS);
 }
 
+static size_t
+string_hasher (void const *data, size_t n_buckets)
+{
+  char const *p = data;
+  return hash_string (p, n_buckets);
+}
+
+static bool
+string_comparator (void const *a, void const *b)
+{
+  return strcmp (a, b) == 0;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -256,6 +283,9 @@ main (int argc, char **argv)
   int flags, opt;
   int chunks_so_far = 0;
   int total_chunks = 0;
+  Hash_table *paths;
+
+  paths = hash_initialize (10, NULL, string_hasher, string_comparator, free);
 
   data = hash_initialize (10, NULL, chunk_hasher, chunk_compare, chunk_free);
 
@@ -293,7 +323,7 @@ main (int argc, char **argv)
             {
               total_bytes += e->fts_statp->st_size;
 
-              if (analyze (data, e->fts_accpath, e->fts_path, e->fts_statp, &total_chunks) < 0)
+              if (analyze (data, paths, e->fts_accpath, e->fts_path, e->fts_statp, &total_chunks) < 0)
                 error (0, errno, "error processing file %s", e->fts_path);
             }
         }
